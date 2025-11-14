@@ -106,7 +106,12 @@ O projeto foi dividido em **duas estruturas independentes**:
 
 Ambas as partes precisam estar rodando simultaneamente para a aplicação completa funcionar.
 
----
+**Observação:** Para um maior detalhamento do Frontend e do Backend (configurações, scripts, rotas e documentação específica), consulte os README.md disponíveis em:
+
+- Frontend-projeto-pi-04-main/README.md
+- Backend-projeto-pi-04-main/README.md
+
+Cada README contém instruções e informações detalhadas sobre sua respectiva frente.
 
 ## 🚀 Como Executar
 
