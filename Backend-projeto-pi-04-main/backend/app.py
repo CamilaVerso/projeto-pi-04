@@ -207,6 +207,32 @@ def obter_sinais_vitais(cpf):
     } for sinal in sinais]
     return jsonify(resultado), 200
 
+@app.route('/api/sinais-vitais/<cpf>', methods=['DELETE'])
+@login_required
+def delete_sinais_vitais(cpf):
+    """
+    Apaga TODOS os registros de sinais vitais associados a um CPF.
+    """
+    cpf_limpo = re.sub(r'\D', '', cpf)
+
+    usuario = Usuario.query.filter_by(cpf=cpf_limpo).first()
+    if not usuario:
+        return jsonify({'error': 'Usuário não encontrado'}), 404
+
+    try:
+        num_registros_apagados = SinaisVitais.query.filter_by(usuario_cpf=cpf_limpo).delete()
+        db.session.commit()
+
+        if num_registros_apagados > 0:
+            return jsonify({'message': f'{num_registros_apagados} registros de sinais vitais foram apagados com sucesso para o CPF {cpf_limpo}.'}), 200
+        else:
+            return jsonify({'error': 'Nenhum registro de sinais vitais encontrado para este CPF.'}), 404
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Erro ao deletar sinais vitais: {e}")
+        return jsonify({'error': 'Erro interno ao apagar os registros.'}), 500
+
 @app.route('/api/risco/<cpf>', methods=['GET'])
 @login_required
 def prever_risco(cpf):
@@ -247,7 +273,9 @@ def prever_risco(cpf):
     except Exception as e:
         return jsonify({'error': 'Falha ao realizar a predição.', 'details': str(e)}), 500
 
+
 if __name__ == '__main__':
    port = int(os.environ.get("PORT", 5000))
+   print("\n--- INSPECIONANDO ROTAS REGISTRADAS NO FLASK ---")
    app.run(host="0.0.0.0", port=port)
 
