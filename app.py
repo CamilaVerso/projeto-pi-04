@@ -24,7 +24,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.join(instance_path,
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'erlandsonsilvadonascimento')
 
-CORS(app, supports_credentials=True, origins=["http://localhost:5173", "https://projeto-pi-04-1.onrender.com", "https://projeto-pi-04-c4je.onrender.com", "https://projeto-pi-04-1-7si2.onrender.com"])
+CORS(app, supports_credentials=True, origins=["http://localhost:5173", "https://projeto-pi-04-1.onrender.com"])
 
 db = SQLAlchemy(app)
 
@@ -173,39 +173,10 @@ def update_gestante(cpf):
     cpf_limpo = re.sub(r'\D', '', cpf)
     usuario = Usuario.query.filter_by(cpf=cpf_limpo).first_or_404()
     data = request.get_json()
-
-    # 1. Atualiza os dados de texto
-    campos_texto = ['nome', 'nome_mae', 'endereco', 'cep', 'cidade', 'estado', 'telefone']
-    for campo in campos_texto:
-        if campo in data and data[campo] is not None:
-            setattr(usuario, campo, data[campo])
-
-    # 2. Atualiza as datas 
-    try:
-        if 'ultima_menstruacao' in data and data['ultima_menstruacao']:
-            usuario.ultima_menstruacao = parse_date_flexible(data['ultima_menstruacao'])
-        
-        if 'data_prevista_parto' in data and data['data_prevista_parto']:
-            usuario.data_prevista_parto = parse_date_flexible(data['data_prevista_parto'])
-            
-        if 'data_nascimento' in data and data['data_nascimento']:
-            usuario.data_nascimento = parse_date_flexible(data['data_nascimento'])
-            # Recalcula a idade se a data de nascimento mudar
-            usuario.idade = (datetime.now() - usuario.data_nascimento).days // 365
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-
-    # 3. Mantém a atualização do cronograma
     if 'cronograma' in data:
         usuario.cronograma = data['cronograma']
-
-    # 4. Salva no banco de dados
-    try:
-        db.session.commit()
-        return jsonify(usuario.to_dict()), 200
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': 'Erro ao atualizar no banco', 'details': str(e)}), 500
+    db.session.commit()
+    return jsonify(usuario.to_dict()), 200
 
 @app.route('/api/sinais-vitais/<cpf>', methods=['POST'])
 @login_required
@@ -272,86 +243,42 @@ def delete_sinais_vitais(cpf):
 @login_required
 def prever_risco(cpf):
     model_path = os.path.join(instance_path, 'risk_model.joblib')
+    if not os.path.exists(model_path):
+        return jsonify({'error': 'Modelo de predição ainda não foi treinado. Execute o script train_model.py primeiro.'}), 500
     
-    # Captura os sintomas enviados pelo Checklist do médico (0 ou 1)
-    # Ex: /api/risco/12345678900?sangramento=1&cefaleia=0&edema=0
-    sangramento = request.args.get('sangramento', 0, type=int)
-    cefaleia = request.args.get('cefaleia', 0, type=int)
-    edema = request.args.get('edema', 0, type=int)
-
+    model = joblib.load(model_path)
     cpf_limpo = re.sub(r'\D', '', cpf)
     usuario = Usuario.query.filter_by(cpf=cpf_limpo).first()
-    sinais = SinaisVitais.query.filter_by(usuario_cpf=cpf_limpo).order_by(SinaisVitais.timestamp.desc()).all()
+    sinais = SinaisVitais.query.filter_by(usuario_cpf=cpf_limpo).all()
 
     if not usuario or not sinais:
-        return jsonify({'error': 'Dados insuficientes para fazer a predição.'}), 404
+        return jsonify({'error': 'Dados insuficientes para fazer a predição (cadastro ou sinais vitais não encontrados).'}), 404
     
-    ultimo_sinal = sinais[0]
-    idade = usuario.idade
+    sinais_df = pd.DataFrame([s.__dict__ for s in sinais])
+    batimentos_avg = sinais_df['batimentos_cardiacos'].mean()
+    oxigenacao_avg = sinais_df['oxigenacao_sangue'].mean()
+    pressao_sistolica_avg = sinais_df['pressao_sistolica'].mean()
+    pressao_diastolica_avg = sinais_df['pressao_diastolica'].mean()
 
-    # --- INÍCIO DO PROTOCOLO FERRAZ DE VASCONCELOS (Pág 25-26) ---
-    pontos_ferraz = 0
-
-    # 1. Pontuação por Sintomas (Dados do Checklist Médico)
-    if sangramento: pontos_ferraz += 10  # Peso máximo no manual
-    if cefaleia: pontos_ferraz += 5     # Sinal de pré-eclâmpsia
-    if edema: pontos_ferraz += 1        # Sinal de alerta leve
-
-    # 2. Pontuação por Sinais Vitais (Dados do Sensor/Simulador)
-    if ultimo_sinal.pressao_sistolica >= 140 or ultimo_sinal.pressao_diastolica >= 90:
-        pontos_ferraz += 10
-    if ultimo_sinal.batimentos_cardiacos > 110:
-        pontos_ferraz += 5
-    if ultimo_sinal.oxigenacao_sangue < 94:
-        pontos_ferraz += 10
-
-    # 3. Pontuação por Idade (Fator Reprodutivo)
-    if idade >= 40 or idade <= 15:
-        pontos_ferraz += 5
-
-    # --- CLASSIFICAÇÃO DE RISCO FINAL ---
-    # Conforme o manual, pontos acumulados definem a urgência
-    if pontos_ferraz >= 10:
-        risco_final = "Alto"
-    elif pontos_ferraz >= 5:
-        risco_final = "Médio"
-    else:
-        risco_final = "Baixo"
-
-    # Se o risco for baixo pelos pontos, ainda rodamos a IA para checar tendências
-    metodo_usado = "Protocolo Clínico Ferraz 2025"
+    dados_para_prever = pd.DataFrame([[
+        usuario.idade,
+        batimentos_avg,
+        oxigenacao_avg,
+        pressao_sistolica_avg,
+        pressao_diastolica_avg
+    ]], columns=['idade', 'batimentos_avg', 'oxigenacao_avg', 'pressao_sistolica_avg', 'pressao_diastolica_avg'])
     
-    if risco_final == "Baixo" and os.path.exists(model_path):
-        try:
-            model = joblib.load(model_path)
-            sinais_df = pd.DataFrame([{
-                'bat': s.batimentos_cardiacos, 'oxi': s.oxigenacao_sangue,
-                'sis': s.pressao_sistolica, 'dia': s.pressao_diastolica
-            } for s in sinais])
+    # --- LINHA DE CORREÇÃO ADICIONADA ---
+    # Garante que os nomes das colunas são strings, igual ao treino
+    dados_para_prever.columns = dados_para_prever.columns.astype(str)
 
-            dados_para_prever = pd.DataFrame([[
-                idade, sinais_df['bat'].mean(), sinais_df['oxi'].mean(),
-                sinais_df['sis'].mean(), sinais_df['dia'].mean()
-            ]], columns=['idade', 'batimentos_avg', 'oxigenacao_avg', 'pressao_sistolica_avg', 'pressao_diastolica_avg'])
-            
-            dados_para_prever.columns = dados_para_prever.columns.astype(str)
-            predicao = model.predict(dados_para_prever)
-            
-            if predicao[0] != "Baixo":
-                risco_final = predicao[0]
-                metodo_usado = "Machine Learning (Tendência Histórica)"
-        except:
-            pass # Se a IA falhar, mantemos o risco clínico por segurança
+    try:
+        predicao = model.predict(dados_para_prever)
+        risco = predicao[0]
+        return jsonify({'risco': risco}), 200
+    except Exception as e:
+        return jsonify({'error': 'Falha ao realizar a predição.', 'details': str(e)}), 500
 
-    return jsonify({
-        'risco': risco_final,
-        'pontuacao_total': pontos_ferraz,
-        'metodo': metodo_usado,
-        'detalhes': {
-            'sangramento': bool(sangramento),
-            'pressao': f"{ultimo_sinal.pressao_sistolica}/{ultimo_sinal.pressao_diastolica}"
-        }
-    }), 200
 
 if __name__ == '__main__':
    port = int(os.environ.get("PORT", 5000))
